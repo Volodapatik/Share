@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR-Bridge — оптична передача файлів</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>QR-Bridge</h1>
+  <div class="mode-switch" role="tablist">
+    <button id="tabSender" class="mode-btn active" role="tab">📤 Відправник</button>
+    <button id="tabReceiver" class="mode-btn" role="tab">📥 Отримувач</button>
+  </div>
+</header>
+
+<!-- ==================== ПАНЕЛЬ ВІДПРАВНИКА ==================== -->
+<section id="panelSender" class="panel active">
+  <div class="card">
+    <label class="file-picker">
+      <input type="file" id="fileInput" hidden>
+      <span id="fileLabel">Обрати файл для передачі…</span>
+    </label>
+
+    <div class="settings-row">
+      <label>Розмір блоку
+        <select id="blockSizeSel">
+          <option value="80">80 B (надійно)</option>
+          <option value="120" selected>120 B (баланс)</option>
+          <option value="180">180 B (швидко)</option>
+          <option value="260">260 B (максимум)</option>
+        </select>
+      </label>
+      <label>FPS кадрів
+        <select id="fpsSel">
+          <option value="10">10</option>
+          <option value="15" selected>15</option>
+          <option value="24">24</option>
+          <option value="30">30</option>
+          <option value="60">60</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="qr-wrap">
+      <canvas id="qrCanvas" width="300" height="300"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="btnStartSend" class="btn primary" disabled>▶ Почати трансляцію</button>
+      <button id="btnStopSend" class="btn danger" disabled>■ Стоп</button>
+    </div>
+  </div>
+
+  <div class="stats-bar" id="statsSender">
+    <div class="stat"><span class="stat-val" id="sFps">0</span><span class="stat-lbl">FPS</span></div>
+    <div class="stat"><span class="stat-val" id="sGoodput">0</span><span class="stat-lbl">КБ/с</span></div>
+    <div class="stat"><span class="stat-val" id="sProgress">0%</span><span class="stat-lbl">Прогрес</span></div>
+    <div class="stat"><span class="stat-val" id="sTimer">00:00</span><span class="stat-lbl">Час</span></div>
+  </div>
+  <div class="progress-outer"><div class="progress-inner" id="sProgressBar"></div></div>
+  <p class="hint" id="sHint">Оберіть файл, щоб почати.</p>
+</section>
+
+<!-- ==================== ПАНЕЛЬ ОТРИМУВАЧА ==================== -->
+<section id="panelReceiver" class="panel">
+  <div class="card">
+    <div class="video-wrap">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="scanOverlay"></canvas>
+      <div id="lockBadge" class="lock-badge lost">НЕМАЄ СИГНАЛУ</div>
+    </div>
+
+    <div class="controls">
+      <button id="btnStartScan" class="btn primary">▶ Увімкнути камеру</button>
+      <button id="btnStopScan" class="btn danger" disabled>■ Стоп</button>
+      <button id="btnResetRecv" class="btn secondary">↺ Скинути</button>
+    </div>
+  </div>
+
+  <div class="stats-bar" id="statsReceiver">
+    <div class="stat"><span class="stat-val" id="rFps">0</span><span class="stat-lbl">FPS</span></div>
+    <div class="stat"><span class="stat-val" id="rGoodput">0</span><span class="stat-lbl">КБ/с</span></div>
+    <div class="stat"><span class="stat-val" id="rProgress">0%</span><span class="stat-lbl">Прогрес</span></div>
+    <div class="stat"><span class="stat-val" id="rTimer">00:00</span><span class="stat-lbl">Час</span></div>
+  </div>
+  <div class="progress-outer"><div class="progress-inner" id="rProgressBar"></div></div>
+  <p class="hint" id="rHint">Наведіть камеру на екран відправника.</p>
+</section>
+
+<canvas id="captureCanvas" hidden></canvas>
+
+<!-- CDN бібліотеки: генерація QR (byte-mode) та сканування (jsQR) -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
