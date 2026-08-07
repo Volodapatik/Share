@@ -16,7 +16,6 @@
   </div>
 </header>
 
-<!-- ==================== ПАНЕЛЬ ВІДПРАВНИКА ==================== -->
 <section id="panelSender" class="panel active">
   <div class="card">
     <label class="file-picker">
@@ -64,7 +63,6 @@
   <p class="hint" id="sHint">Оберіть файл, щоб почати.</p>
 </section>
 
-<!-- ==================== ПАНЕЛЬ ОТРИМУВАЧА ==================== -->
 <section id="panelReceiver" class="panel">
   <div class="card">
     <div class="video-wrap">
@@ -108,6 +106,20 @@
       document.head.appendChild(s);
     });
   }
+  async function loadWithFallback(name, mirrors) {
+    let lastErr;
+    for (const url of mirrors) {
+      try {
+        await loadScript(url);
+        console.log(name + " OK from " + url);
+        return;
+      } catch (e) {
+        lastErr = e;
+        console.warn(e.message);
+      }
+    }
+    throw lastErr || new Error("Не вдалося завантажити " + name);
+  }
   function showFatal(msg) {
     const b = document.getElementById("errBanner");
     document.getElementById("errText").textContent = msg;
@@ -115,19 +127,22 @@
   }
   (async () => {
     try {
-      // Спочатку локальні файли (найнадійніше), потім CDN-fallback
-      await loadScript("qrcode.min.js").catch(() =>
-        loadScript("https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js")
-      );
-      await loadScript("jsQR.js").catch(() =>
-        loadScript("https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js")
-      );
-
+      await loadWithFallback("qrcode", [
+        "https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js",
+        "https://fastly.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js",
+        "https://cdn.jsdelivr.net/npm/qrcode@1.4.4/build/qrcode.min.js",
+        "https://unpkg.com/qrcode@1.5.1/build/qrcode.min.js"
+      ]);
       if (typeof QRCode === "undefined" || typeof QRCode.toCanvas !== "function") {
-        throw new Error("QRCode.toCanvas недоступний. Бібліотека qrcode не завантажилась коректно.");
+        throw new Error("QRCode.toCanvas недоступний");
       }
+      await loadWithFallback("jsQR", [
+        "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
+        "https://fastly.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
+        "https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"
+      ]);
       if (typeof jsQR === "undefined") {
-        throw new Error("jsQR недоступний.");
+        throw new Error("jsQR недоступний");
       }
       await loadScript("app.js");
     } catch (e) {
