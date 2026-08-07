@@ -125,7 +125,7 @@ function encodeMetaFrame(sessionId, K, blockSize, fileSize, crc, mime, name) {
   dv.setUint32(9, fileSize);
   dv.setUint32(13, crc);
   let off = 17;
-  buf[off++] = mimeB.length; buf.set(mimeB, off); off += nameB.length;
+  buf[off++] = mimeB.length; buf.set(mimeB, off); off += mimeB.length;
   buf[off++] = nameB.length; buf.set(nameB, off); off += nameB.length;
   return buf;
 }
