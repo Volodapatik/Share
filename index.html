@@ -92,18 +92,11 @@
 
 <canvas id="captureCanvas" hidden></canvas>
 
-<!-- Видима панель помилок для діагностики на телефоні (без USB-дебагу) -->
 <div id="errBanner" class="err-banner" hidden>
   <div id="errText"></div>
   <button id="errClose">✕</button>
 </div>
 
-<!--
-  Завантаження зовнішніх бібліотек із кількома резервними CDN-дзеркалами.
-  Якщо основний CDN (jsdelivr) заблокований оператором/фаєрволом — пробуємо
-  cdnjs, потім unpkg. Лише після успішного завантаження ОБОХ бібліотек
-  підключається app.js. Якщо всі дзеркала недоступні — показуємо помилку.
--->
 <script>
 (function () {
   function loadScript(url) {
@@ -115,14 +108,6 @@
       document.head.appendChild(s);
     });
   }
-  async function loadWithFallback(name, mirrors) {
-    let lastErr;
-    for (const url of mirrors) {
-      try { await loadScript(url); return; }
-      catch (e) { lastErr = e; console.warn(e.message); }
-    }
-    throw new Error(`Бібліотеку "${name}" не вдалося завантажити з жодного CDN. Перевірте інтернет-з'єднання або вимкніть блокувальник реклами/скриптів.`);
-  }
   function showFatal(msg) {
     const b = document.getElementById("errBanner");
     document.getElementById("errText").textContent = msg;
@@ -130,25 +115,19 @@
   }
   (async () => {
     try {
-      await loadWithFallback("qrcode", [
-        "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js",
-        "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js",
-        "https://unpkg.com/qrcode@1.5.3/build/qrcode.min.js",
-      ]);
-      // cdnjs qrcodejs — інша бібліотека (davidshimjs), тож перевіряємо саме потрібний API
+      // Спочатку локальні файли (найнадійніше), потім CDN-fallback
+      await loadScript("qrcode.min.js").catch(() =>
+        loadScript("https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js")
+      );
+      await loadScript("jsQR.js").catch(() =>
+        loadScript("https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js")
+      );
+
       if (typeof QRCode === "undefined" || typeof QRCode.toCanvas !== "function") {
-        // якщо підвантажилась не та бібліотека (без toCanvas) — примусово беремо unpkg-версію
-        await loadScript("https://unpkg.com/qrcode@1.5.3/build/qrcode.min.js");
-      }
-      await loadWithFallback("jsQR", [
-        "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
-        "https://unpkg.com/jsqr@1.4.0/dist/jsQR.js",
-      ]);
-      if (typeof QRCode === "undefined" || typeof QRCode.toCanvas !== "function") {
-        throw new Error("Бібліотека qrcode завантажилась, але QRCode.toCanvas недоступний.");
+        throw new Error("QRCode.toCanvas недоступний. Бібліотека qrcode не завантажилась коректно.");
       }
       if (typeof jsQR === "undefined") {
-        throw new Error("Бібліотека jsQR завантажилась, але глобальна функція jsQR недоступна.");
+        throw new Error("jsQR недоступний.");
       }
       await loadScript("app.js");
     } catch (e) {
@@ -157,7 +136,6 @@
     }
   })();
 
-  // Глобальний перехоплювач помилок — показує їх прямо на екрані телефону
   window.addEventListener("error", (e) => showFatal("⚠ Помилка: " + e.message));
   window.addEventListener("unhandledrejection", (e) => showFatal("⚠ Помилка: " + (e.reason && e.reason.message || e.reason)));
   document.getElementById("errClose").onclick = () => { document.getElementById("errBanner").hidden = true; };
