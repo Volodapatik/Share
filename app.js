@@ -125,7 +125,7 @@ function encodeMetaFrame(sessionId, K, blockSize, fileSize, crc, mime, name) {
   dv.setUint32(9, fileSize);
   dv.setUint32(13, crc);
   let off = 17;
-  buf[off++] = mimeB.length; buf.set(mimeB, off); off += mimeB.length;
+  buf[off++] = mimeB.length; buf.set(mimeB, off); off += nameB.length;
   buf[off++] = nameB.length; buf.set(nameB, off); off += nameB.length;
   return buf;
 }
@@ -339,6 +339,20 @@ $("btnStopSend").onclick = () => {
 
 function sendLoop(now) {
   if (!sendState || !sendState.running) return;
+  // Захист: якщо всередині ітерації станеться виняток (наприклад, бібліотека
+  // QR не завантажилась) — цикл НЕ повинен мовчки зупинятись. Помилка
+  // показується у підказці й у видимому банері, а цикл продовжується.
+  try {
+    sendTick(now);
+  } catch (e) {
+    console.error("sendLoop error:", e);
+    $("sHint").textContent = "⚠ Помилка трансляції: " + e.message;
+    $("sHint").className = "hint error";
+  }
+  requestAnimationFrame(sendLoop);
+}
+
+function sendTick(now) {
   const st = sendState;
 
   if (now - st.lastFrameTime >= st.frameInterval) {
@@ -387,19 +401,28 @@ function sendLoop(now) {
     $("sGoodput").textContent = st.goodputDisplay;
     $("sTimer").textContent = fmtTime((now - st.startTime) / 1000);
   }
-
-  requestAnimationFrame(sendLoop);
 }
 
 function renderQR(bytes) {
+  if (typeof QRCode === "undefined" || typeof QRCode.toCanvas !== "function") {
+    throw new Error("Бібліотека QRCode не завантажена (перевірте інтернет-з'єднання).");
+  }
   const canvas = $("qrCanvas");
   // qrcode.js: масив чисел (не рядок) із mode:'byte' кодується як «сирі» байти,
   // без UTF-8 перетворення — це критично, бо наші дані бінарні.
+  // Колбек qrcode.js асинхронний — тому помилку кодування явно піднімаємо
+  // в UI через hint, а не лише в консоль (яка на телефоні недоступна).
   QRCode.toCanvas(
     canvas,
     [{ data: Array.from(bytes), mode: "byte" }],
     { errorCorrectionLevel: "L", margin: 1, scale: 6 },
-    (err) => { if (err) console.error("QR render error:", err); }
+    (err) => {
+      if (err) {
+        console.error("QR render error:", err);
+        $("sHint").textContent = "⚠ Помилка рендеру QR: " + err.message;
+        $("sHint").className = "hint error";
+      }
+    }
   );
 }
 
@@ -479,6 +502,22 @@ const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
 
 function scanLoop(now) {
   if (!mediaStream) return;
+  // Так само, як і в sendLoop: захищаємо тіло циклу від винятків, інакше
+  // одна помилка декодування назавжди зупинить сканування без пояснень.
+  try {
+    scanTick(now);
+  } catch (e) {
+    console.error("scanLoop error:", e);
+    $("rHint").textContent = "⚠ Помилка сканування: " + e.message;
+    $("rHint").className = "hint error";
+  }
+  scanRAF = requestAnimationFrame(scanLoop);
+}
+
+function scanTick(now) {
+  if (typeof jsQR === "undefined") {
+    throw new Error("Бібліотека jsQR не завантажена (перевірте інтернет-з'єднання).");
+  }
   const video = $("video");
 
   if (video.readyState === video.HAVE_ENOUGH_DATA) {
@@ -523,8 +562,6 @@ function scanLoop(now) {
       $("rProgressBar").style.width = pct + "%";
     }
   }
-
-  scanRAF = requestAnimationFrame(scanLoop);
 }
 
 function handleFrame(bytes, now) {
