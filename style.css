@@ -178,7 +178,7 @@ select {
 .hint.success { color: var(--ok); font-weight: 600; }
 .hint.error { color: var(--danger); font-weight: 600; }
 
-/* Видима панель помилок — для діагностики прямо на телефоні, без USB-дебагу */
+/* Банер помилок — можна закрити, не спамить */
 .err-banner {
   position: fixed;
   left: 8px; right: 8px; bottom: 8px;
@@ -187,20 +187,31 @@ select {
   border: 1px solid var(--danger);
   color: #ffd7d7;
   border-radius: 10px;
-  padding: 10px 12px;
-  font-size: 12px;
+  padding: 12px 14px;
+  font-size: 13px;
   line-height: 1.4;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   box-shadow: 0 4px 16px rgba(0,0,0,.5);
 }
 .err-banner #errText { flex: 1; word-break: break-word; }
 .err-banner button {
-  background: transparent;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  background: rgba(255,255,255,.12);
   border: none;
+  border-radius: 8px;
   color: #ffd7d7;
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1;
-  padding: 0 4px;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.err-banner button:active {
+  background: rgba(255,255,255,.25);
 }
