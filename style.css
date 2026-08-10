@@ -95,7 +95,12 @@ select {
   padding: 10px;
   margin-bottom: 12px;
 }
-#qrCanvas { width: 100%; max-width: 320px; height: auto; image-rendering: pixelated; }
+#qrCanvas {
+  width: 100%;
+  max-width: 360px;
+  height: auto;
+  image-rendering: pixelated;
+}
 
 .video-wrap {
   position: relative;
@@ -119,6 +124,7 @@ select {
 }
 .lock-badge.lost { background: rgba(248,113,113,.85); color: #2a0a0a; }
 .lock-badge.locked { background: rgba(74,222,128,.9); color: #06280f; }
+.lock-badge.partial { background: rgba(251,191,36,.9); color: #422006; }
 
 .controls {
   display: flex;

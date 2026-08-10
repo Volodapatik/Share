@@ -136,22 +136,29 @@ function decodeFrame(bytes) {
   const type = bytes[2];
   if (type === 1) {
     if (bytes.length < 13) return null;
+    const blockSize = dv.getUint16(7);
+    // payload має бути рівно blockSize (або трохи більше через padding QR — беремо рівно)
+    if (bytes.length < 13 + blockSize) return null;
     return {
       type: 1,
       sessionId: dv.getUint16(3),
       K: dv.getUint16(5),
-      blockSize: dv.getUint16(7),
+      blockSize,
       esi: dv.getUint32(9),
-      payload: bytes.subarray(13),
+      payload: bytes.subarray(13, 13 + blockSize),
     };
   }
   if (type === 0) {
     if (bytes.length < 18) return null;
     let off = 17;
+    if (off >= bytes.length) return null;
     const mimeLen = bytes[off++];
+    if (off + mimeLen > bytes.length) return null;
     const mime = new TextDecoder().decode(bytes.subarray(off, off + mimeLen)); off += mimeLen;
+    if (off >= bytes.length) return null;
     const nameLen = bytes[off++];
-    const name = new TextDecoder().decode(bytes.subarray(off, off + nameLen)); off += nameLen;
+    if (off + nameLen > bytes.length) return null;
+    const name = new TextDecoder().decode(bytes.subarray(off, off + nameLen));
     return {
       type: 0,
       sessionId: dv.getUint16(3),
@@ -283,9 +290,19 @@ let sendState = null; // активна сесія трансляції
 $("fileInput").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  $("fileLabel").textContent = `${file.name} (${(file.size / 1024).toFixed(1)} КБ)`;
+  const sizeKb = (file.size / 1024).toFixed(1);
+  $("fileLabel").textContent = `${file.name} (${sizeKb} КБ)`;
   $("btnStartSend").disabled = false;
   sendState = { file, running: false };
+
+  // Оптична передача повільна — попереджаємо про великі файли
+  if (file.size > 300 * 1024) {
+    $("sHint").textContent = `⚠ Файл ${sizeKb} КБ завеликий для швидкої передачі. Краще ≤ 100–200 КБ або зменшіть розмір блоку.`;
+    $("sHint").className = "hint error";
+  } else {
+    $("sHint").textContent = "Файл обрано. Натисніть «Почати трансляцію».";
+    $("sHint").className = "hint";
+  }
 });
 
 $("btnStartSend").onclick = async () => {
@@ -312,6 +329,7 @@ $("btnStartSend").onclick = async () => {
     file, blocks, K, blockSize, crc, sessionId, fps,
     fileSize: buf.length,
     esi: 0,
+    framesSent: 0,
     running: true,
     frameInterval: 1000 / fps,
     lastFrameTime: 0,
@@ -323,7 +341,7 @@ $("btnStartSend").onclick = async () => {
   $("btnStartSend").disabled = true;
   $("btnStopSend").disabled = false;
   $("fileInput").disabled = true;
-  $("sHint").textContent = "Трансляція триває… наведіть камеру приймача на екран.";
+  $("sHint").textContent = `Трансляція… K=${K} блоків. Наведіть камеру приймача на QR.`;
   $("sHint").className = "hint";
 
   requestAnimationFrame(sendLoop);
@@ -339,9 +357,6 @@ $("btnStopSend").onclick = () => {
 
 function sendLoop(now) {
   if (!sendState || !sendState.running) return;
-  // Захист: якщо всередині ітерації станеться виняток (наприклад, бібліотека
-  // QR не завантажилась) — цикл НЕ повинен мовчки зупинятись. Помилка
-  // показується у підказці й у видимому банері, а цикл продовжується.
   try {
     sendTick(now);
   } catch (e) {
@@ -372,20 +387,18 @@ function sendTick(now) {
       for (const idx of indices) xorInto(payload, st.blocks[idx]);
       frameBytes = encodeDataFrame(st.sessionId, st.K, st.blockSize, st.esi, payload);
       st.esi++;
-      // esi продовжує рости нескінченно — repair-кадри дають дедалі нові
-      // лінійні комбінації, тож приймач зрештою набере потрібні K символів.
     }
 
     renderQR(frameBytes);
-
+    st.framesSent++;
     st.bytesSent += frameBytes.length;
     st.fpsCounter++;
 
-    // Прогрес показуємо як частку унікальних систематичних esi, вже відправлених,
-    // по модулю циклу (орієнтовний індикатор активності, не точний прогрес приймача)
-    const cycleProgress = Math.min(100, Math.round(((st.esi % (st.K * 2)) / st.K) * 100));
-    $("sProgress").textContent = cycleProgress + "%";
-    $("sProgressBar").style.width = cycleProgress + "%";
+    // Прогрес: скільки систематичних блоків уже «пройшло» (орієнтир)
+    const sysDone = Math.min(st.esi, st.K);
+    const pct = Math.min(100, Math.round((sysDone / st.K) * 100));
+    $("sProgress").textContent = pct + "%";
+    $("sProgressBar").style.width = pct + "%";
   }
 
   // Оновлення статистики раз на секунду
@@ -408,14 +421,17 @@ function renderQR(bytes) {
     throw new Error("Бібліотека QRCode не завантажена (перевірте інтернет-з'єднання).");
   }
   const canvas = $("qrCanvas");
-  // qrcode.js: масив чисел (не рядок) із mode:'byte' кодується як «сирі» байти,
-  // без UTF-8 перетворення — це критично, бо наші дані бінарні.
-  // Колбек qrcode.js асинхронний — тому помилку кодування явно піднімаємо
-  // в UI через hint, а не лише в консоль (яка на телефоні недоступна).
+  // Фіксований width дає стабільний розмір модулів. ECC M краще переносить
+  // відблиски/розмиття з екрана телефону, ніж L. Margin 2 — більше quiet zone.
   QRCode.toCanvas(
     canvas,
     [{ data: Array.from(bytes), mode: "byte" }],
-    { errorCorrectionLevel: "L", margin: 1, scale: 6 },
+    {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 360,
+      color: { dark: "#000000", light: "#ffffff" }
+    },
     (err) => {
       if (err) {
         console.error("QR render error:", err);
@@ -436,7 +452,11 @@ let scanRAF = null;
 
 $("btnStartScan").onclick = startScan;
 $("btnStopScan").onclick = stopScan;
-$("btnResetRecv").onclick = () => { initReceiverState(); $("rHint").textContent = "Стан скинуто."; $("rHint").className = "hint"; };
+$("btnResetRecv").onclick = () => {
+  initReceiverState();
+  $("rHint").textContent = "Стан скинуто.";
+  $("rHint").className = "hint";
+};
 
 function initReceiverState() {
   recvState = {
@@ -447,6 +467,7 @@ function initReceiverState() {
     scanCount: 0, fpsLastCheck: performance.now(), fpsDisplay: 0,
     newBytesLastCheck: performance.now(), goodputDisplay: 0,
     lastValidFrameAt: 0,
+    lastAnyQrAt: 0,
     completed: false,
   };
   $("rProgress").textContent = "0%";
@@ -457,7 +478,11 @@ initReceiverState();
 async function startScan() {
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: {
+        facingMode: "environment",
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
       audio: false,
     });
   } catch (err) {
@@ -473,7 +498,7 @@ async function startScan() {
 
   $("btnStartScan").disabled = true;
   $("btnStopScan").disabled = false;
-  $("rHint").textContent = "Сканування… шукаємо QR-кадри.";
+  $("rHint").textContent = "Сканування… тримайте QR рівно в кадрі, мінімум відблисків.";
   $("rHint").className = "hint";
 
   scanRAF = requestAnimationFrame(scanLoop);
@@ -491,10 +516,18 @@ function stopScan() {
   setLock(false);
 }
 
-function setLock(on) {
+function setLock(on, partial) {
   const badge = $("lockBadge");
-  badge.textContent = on ? "СИНХРОНІЗОВАНО" : "НЕМАЄ СИГНАЛУ";
-  badge.className = "lock-badge " + (on ? "locked" : "lost");
+  if (on) {
+    badge.textContent = "СИНХРОНІЗОВАНО";
+    badge.className = "lock-badge locked";
+  } else if (partial) {
+    badge.textContent = "QR ВИДНО";
+    badge.className = "lock-badge partial";
+  } else {
+    badge.textContent = "НЕМАЄ СИГНАЛУ";
+    badge.className = "lock-badge lost";
+  }
 }
 
 const captureCanvas = $("captureCanvas");
@@ -502,8 +535,6 @@ const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
 
 function scanLoop(now) {
   if (!mediaStream) return;
-  // Так само, як і в sendLoop: захищаємо тіло циклу від винятків, інакше
-  // одна помилка декодування назавжди зупинить сканування без пояснень.
   try {
     scanTick(now);
   } catch (e) {
@@ -521,21 +552,35 @@ function scanTick(now) {
   const video = $("video");
 
   if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    captureCanvas.width = video.videoWidth;
-    captureCanvas.height = video.videoHeight;
-    captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-    const imgData = captureCtx.getImageData(0, 0, captureCanvas.width, captureCanvas.height);
+    // Обмежуємо розмір для швидкості (jsQR важкий на великих кадрах)
+    const maxDim = 720;
+    let w = video.videoWidth;
+    let h = video.videoHeight;
+    if (w > maxDim || h > maxDim) {
+      const scale = maxDim / Math.max(w, h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+    }
+    captureCanvas.width = w;
+    captureCanvas.height = h;
+    captureCtx.drawImage(video, 0, 0, w, h);
+    const imgData = captureCtx.getImageData(0, 0, w, h);
 
-    const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: "dontInvert" });
+    // attemptBoth допомагає при відблисках і різному контрасті екрана
+    const code = jsQR(imgData.data, imgData.width, imgData.height, {
+      inversionAttempts: "attemptBoth"
+    });
     recvState.scanCount++;
 
     if (code) {
-      // jsQR у byte-mode повертає сирі байти в binaryData; якщо його немає
-      // (старіша збірка бібліотеки) — відновлюємо байти з кодів символів рядка.
+      recvState.lastAnyQrAt = now;
       const bytes = code.binaryData
         ? Uint8Array.from(code.binaryData)
         : Uint8Array.from(Array.from(code.data).map((c) => c.charCodeAt(0) & 0xFF));
-      handleFrame(bytes, now);
+      const accepted = handleFrame(bytes, now);
+      if (!accepted && (!recvState.decoder || recvState.decoder.solved === 0)) {
+        $("rHint").textContent = "QR видно, але кадр ще не розпізнано як наш. Тримайте рівніше / ближче.";
+      }
     }
   }
 
@@ -550,7 +595,9 @@ function scanTick(now) {
     if (decoder) decoder.newBytesSinceTick = 0;
     recvState.goodputDisplay = (newBytes / 1024).toFixed(1);
 
-    setLock(now - recvState.lastValidFrameAt < 1200);
+    const hasValid = now - recvState.lastValidFrameAt < 1500;
+    const hasAny = now - recvState.lastAnyQrAt < 1200;
+    setLock(hasValid, hasAny && !hasValid);
 
     $("rFps").textContent = recvState.fpsDisplay;
     $("rGoodput").textContent = recvState.goodputDisplay;
@@ -566,17 +613,15 @@ function scanTick(now) {
 
 function handleFrame(bytes, now) {
   const frame = decodeFrame(bytes);
-  if (!frame) return; // не наш кадр / пошкоджений скан — ігноруємо
+  if (!frame) return false;
 
   const st = recvState;
 
-  // Виявлення нової сесії (сендер почав нову передачу) -> скидаємо стан,
-  // якщо поточна сесія ще не завершена успішно.
   if (st.sessionId !== null && st.sessionId !== frame.sessionId && !st.completed) {
     initReceiverState();
   }
   if (st.sessionId === null) st.sessionId = frame.sessionId;
-  if (st.sessionId !== frame.sessionId) return; // ігноруємо чужу/стару сесію після завершення
+  if (st.sessionId !== frame.sessionId) return false;
 
   st.lastValidFrameAt = now;
 
@@ -584,9 +629,13 @@ function handleFrame(bytes, now) {
     if (!st.meta) {
       st.meta = frame;
       if (!st.decoder) st.decoder = new FountainDecoder(frame.K, frame.blockSize);
+      $("rHint").textContent = `Отримано мета: «${frame.name}» (${(frame.fileSize/1024).toFixed(1)} КБ)`;
+      $("rHint").className = "hint";
     }
   } else if (frame.type === 1) {
     if (!st.decoder) st.decoder = new FountainDecoder(frame.K, frame.blockSize);
+    // payload має бути рівно blockSize
+    if (frame.payload.length !== frame.blockSize) return false;
     const indices = symbolIndices(frame.sessionId, frame.esi, frame.K);
     st.decoder.addSymbol(frame.esi, indices, frame.payload);
   }
@@ -594,6 +643,7 @@ function handleFrame(bytes, now) {
   if (st.decoder && st.decoder.done && st.meta && !st.completed) {
     finishTransfer();
   }
+  return true;
 }
 
 function finishTransfer() {
@@ -603,9 +653,9 @@ function finishTransfer() {
   const gotCrc = crc32(fileBytes);
 
   if (gotCrc !== st.meta.crc) {
-    $("rHint").textContent = "Помилка: контрольна сума не збігається. Спробуйте ще раз.";
+    $("rHint").textContent = "Помилка: контрольна сума не збігається. Продовжуємо прийом…";
     $("rHint").className = "hint error";
-    st.completed = false; // дозволяємо продовжити прийом додаткових repair-кадрів
+    st.completed = false;
     return;
   }
 

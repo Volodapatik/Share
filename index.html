@@ -26,25 +26,25 @@
     <div class="settings-row">
       <label>Розмір блоку
         <select id="blockSizeSel">
+          <option value="60">60 B (максимально надійно)</option>
           <option value="80">80 B (надійно)</option>
           <option value="120" selected>120 B (баланс)</option>
           <option value="180">180 B (швидко)</option>
-          <option value="260">260 B (максимум)</option>
         </select>
       </label>
       <label>FPS кадрів
         <select id="fpsSel">
+          <option value="8">8</option>
           <option value="10">10</option>
-          <option value="15" selected>15</option>
-          <option value="24">24</option>
-          <option value="30">30</option>
-          <option value="60">60</option>
+          <option value="12" selected>12</option>
+          <option value="15">15</option>
+          <option value="20">20</option>
         </select>
       </label>
     </div>
 
     <div class="qr-wrap">
-      <canvas id="qrCanvas" width="300" height="300"></canvas>
+      <canvas id="qrCanvas" width="360" height="360"></canvas>
     </div>
 
     <div class="controls">
@@ -60,7 +60,7 @@
     <div class="stat"><span class="stat-val" id="sTimer">00:00</span><span class="stat-lbl">Час</span></div>
   </div>
   <div class="progress-outer"><div class="progress-inner" id="sProgressBar"></div></div>
-  <p class="hint" id="sHint">Оберіть файл, щоб почати.</p>
+  <p class="hint" id="sHint">Оберіть невеликий файл (краще ≤ 200 КБ), щоб почати.</p>
 </section>
 
 <section id="panelReceiver" class="panel">
@@ -85,7 +85,7 @@
     <div class="stat"><span class="stat-val" id="rTimer">00:00</span><span class="stat-lbl">Час</span></div>
   </div>
   <div class="progress-outer"><div class="progress-inner" id="rProgressBar"></div></div>
-  <p class="hint" id="rHint">Наведіть камеру на екран відправника.</p>
+  <p class="hint" id="rHint">Наведіть камеру на екран відправника. Тримайте рівно, уникайте відблисків.</p>
 </section>
 
 <canvas id="captureCanvas" hidden></canvas>
