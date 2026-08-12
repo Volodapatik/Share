@@ -34,7 +34,7 @@ function fmtSize(b) {
 function createPeer(id) {
   return new Promise((resolve, reject) => {
     const p = new Peer(id, {
-      debug: 1,
+      debug: 0,
       config: {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
@@ -145,7 +145,7 @@ async function joinRoom(code) {
     peer = await createPeer();
     isSender = false;
 
-    conn = peer.connect(code, { reliable: true });
+    conn = peer.connect(code, { reliable: true, serialization: "binary" });
     setupConnection(conn);
 
     conn.on("open", () => {
@@ -219,6 +219,11 @@ function scanLoop() {
 
 // ---------- Connection & transfer ----------
 function setupConnection(c) {
+  // Prefer binary serialization for speed
+  if (c.serialization !== "binary") {
+    try { c.serialization = "binary"; } catch (_) {}
+  }
+
   c.on("data", (data) => {
     if (data.type === "meta") {
       startReceive(data);
@@ -243,8 +248,7 @@ function setupConnection(c) {
   });
 }
 
-// Wait until data channel buffer is not too full
-function waitForBuffer(maxBuffered = 2 * 1024 * 1024) {
+function waitForBuffer(maxBuffered = 4 * 1024 * 1024) {
   return new Promise((resolve) => {
     const dc = conn && conn.dataChannel;
     if (!dc || dc.bufferedAmount < maxBuffered) {
@@ -252,23 +256,23 @@ function waitForBuffer(maxBuffered = 2 * 1024 * 1024) {
       return;
     }
     const check = () => {
-      if (!conn || transferAbort || dc.bufferedAmount < maxBuffered / 2) {
+      if (!conn || transferAbort || !dc || dc.bufferedAmount < maxBuffered * 0.4) {
         resolve();
       } else {
-        setTimeout(check, 30);
+        setTimeout(check, 20);
       }
     };
     check();
   });
 }
 
-// Sender: multiple files — optimized
 async function sendFiles(files) {
   transferAbort = false;
   $("fileArea").classList.add("hidden");
   $("transferArea").classList.remove("hidden");
 
-  const chunkSize = 64 * 1024; // 64 KB — набагато краще ніж 16
+  // Більші чанки = менше накладних витрат PeerJS
+  const chunkSize = 256 * 1024; // 256 KB
 
   for (let i = 0; i < files.length && !transferAbort; i++) {
     const file = files[i];
@@ -289,7 +293,6 @@ async function sendFiles(files) {
     let lastBytes = 0;
 
     while (offset < file.size && !transferAbort) {
-      // Не забиваємо буфер data channel
       await waitForBuffer();
 
       const end = Math.min(offset + chunkSize, file.size);
@@ -300,13 +303,13 @@ async function sendFiles(files) {
 
       offset += buf.byteLength;
 
-      const pct = Math.round((offset / file.size) * 100);
+      const pct = Math.min(100, Math.round((offset / file.size) * 100));
       $("sPct").textContent = pct + "%";
       $("sBar").style.width = pct + "%";
       $("sDone").textContent = `${fmtSize(offset)} / ${fmtSize(file.size)}`;
 
       const now = performance.now();
-      if (now - lastTime > 300) {
+      if (now - lastTime > 250) {
         const speed = ((offset - lastBytes) / ((now - lastTime) / 1000)) / 1024;
         $("sSpeed").textContent = speed.toFixed(1) + " КБ/с";
         lastTime = now;
@@ -368,13 +371,13 @@ function onChunk(msg) {
   cur.chunks.push(new Uint8Array(msg.data));
   cur.received += msg.data.byteLength;
 
-  const pct = Math.round((cur.received / cur.size) * 100);
+  const pct = Math.min(100, Math.round((cur.received / cur.size) * 100));
   $("rPct").textContent = pct + "%";
   $("rBar").style.width = pct + "%";
   $("rDone").textContent = `${fmtSize(cur.received)} / ${fmtSize(cur.size)}`;
 
   const now = performance.now();
-  if (now - cur.lastTime > 300) {
+  if (now - cur.lastTime > 250) {
     const speed = ((cur.received - cur.lastBytes) / ((now - cur.lastTime) / 1000)) / 1024;
     $("rSpeed").textContent = speed.toFixed(1) + " КБ/с";
     cur.lastTime = now;
