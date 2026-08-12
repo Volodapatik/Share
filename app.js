@@ -243,14 +243,32 @@ function setupConnection(c) {
   });
 }
 
-// Sender: multiple files
+// Wait until data channel buffer is not too full
+function waitForBuffer(maxBuffered = 2 * 1024 * 1024) {
+  return new Promise((resolve) => {
+    const dc = conn && conn.dataChannel;
+    if (!dc || dc.bufferedAmount < maxBuffered) {
+      resolve();
+      return;
+    }
+    const check = () => {
+      if (!conn || transferAbort || dc.bufferedAmount < maxBuffered / 2) {
+        resolve();
+      } else {
+        setTimeout(check, 30);
+      }
+    };
+    check();
+  });
+}
+
+// Sender: multiple files — optimized
 async function sendFiles(files) {
   transferAbort = false;
   $("fileArea").classList.add("hidden");
   $("transferArea").classList.remove("hidden");
 
-  const totalSize = files.reduce((s, f) => s + f.size, 0);
-  let totalSent = 0;
+  const chunkSize = 64 * 1024; // 64 KB — набагато краще ніж 16
 
   for (let i = 0; i < files.length && !transferAbort; i++) {
     const file = files[i];
@@ -266,18 +284,21 @@ async function sendFiles(files) {
       total: files.length
     });
 
-    const chunkSize = 16 * 1024;
     let offset = 0;
     let lastTime = performance.now();
     let lastBytes = 0;
 
     while (offset < file.size && !transferAbort) {
-      const slice = file.slice(offset, offset + chunkSize);
+      // Не забиваємо буфер data channel
+      await waitForBuffer();
+
+      const end = Math.min(offset + chunkSize, file.size);
+      const slice = file.slice(offset, end);
       const buf = await slice.arrayBuffer();
+
       conn.send({ type: "chunk", data: buf, offset });
 
       offset += buf.byteLength;
-      totalSent += buf.byteLength;
 
       const pct = Math.round((offset / file.size) * 100);
       $("sPct").textContent = pct + "%";
@@ -285,13 +306,12 @@ async function sendFiles(files) {
       $("sDone").textContent = `${fmtSize(offset)} / ${fmtSize(file.size)}`;
 
       const now = performance.now();
-      if (now - lastTime > 400) {
+      if (now - lastTime > 300) {
         const speed = ((offset - lastBytes) / ((now - lastTime) / 1000)) / 1024;
         $("sSpeed").textContent = speed.toFixed(1) + " КБ/с";
         lastTime = now;
         lastBytes = offset;
       }
-      await new Promise((r) => setTimeout(r, 0));
     }
 
     if (!transferAbort) {
@@ -354,7 +374,7 @@ function onChunk(msg) {
   $("rDone").textContent = `${fmtSize(cur.received)} / ${fmtSize(cur.size)}`;
 
   const now = performance.now();
-  if (now - cur.lastTime > 400) {
+  if (now - cur.lastTime > 300) {
     const speed = ((cur.received - cur.lastBytes) / ((now - cur.lastTime) / 1000)) / 1024;
     $("rSpeed").textContent = speed.toFixed(1) + " КБ/с";
     cur.lastTime = now;
