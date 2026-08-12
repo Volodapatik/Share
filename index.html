@@ -5,87 +5,96 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Share — швидка передача файлів</title>
 <link rel="stylesheet" href="style.css">
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 </head>
 <body>
 
 <div class="app">
   <header>
     <h1>Share</h1>
-    <p class="subtitle">Швидка передача файлів між телефонами</p>
+    <p class="subtitle">Швидка P2P передача файлів</p>
   </header>
 
-  <!-- Головний екран -->
-  <section id="screen-home" class="screen active">
-    <div class="card">
-      <button id="btnCreate" class="btn primary big">Створити кімнату</button>
-      <div class="divider">або</div>
-      <div class="join-box">
-        <input type="text" id="joinCode" placeholder="Код кімнати" maxlength="16" autocomplete="off">
-        <button id="btnJoin" class="btn secondary">Приєднатися</button>
-      </div>
+  <!-- HOME -->
+  <section id="home" class="screen active">
+    <button id="btnCreate" class="btn primary big">📤 Створити кімнату</button>
+    <div class="or">або</div>
+    <div class="join-box">
+      <input id="joinCode" type="text" placeholder="Код кімнати" maxlength="20" autocomplete="off">
+      <button id="btnJoin" class="btn secondary">📥 Приєднатися</button>
     </div>
-    <p class="hint">Обидва пристрої мають бути в інтернеті. Файл йде напряму (P2P).</p>
+    <p class="hint">Один QR — і файл летить по Wi-Fi</p>
   </section>
 
-  <!-- Екран відправника (створив кімнату) -->
-  <section id="screen-host" class="screen">
+  <!-- SENDER -->
+  <section id="sender" class="screen">
     <div class="card">
-      <div class="status" id="hostStatus">Очікуємо підключення…</div>
-      <div class="code-box" id="hostCode">—</div>
-      <canvas id="qrCanvas" width="220" height="220"></canvas>
-      <p class="hint">Покажи QR або код другому телефону</p>
+      <div class="status" id="sStatus">Створення кімнати…</div>
+      <div class="code-box" id="roomCode">—</div>
+      <div class="qr-wrap">
+        <canvas id="qrCanvas" width="240" height="240"></canvas>
+      </div>
+      <p class="hint">Нехай отримувач відсканує QR або введе код</p>
 
-      <div id="hostFileArea" class="hidden">
-        <label class="file-btn">
+      <div id="fileArea" class="hidden">
+        <label class="file-picker">
           <input type="file" id="fileInput" hidden>
-          <span>Обрати файл</span>
+          <span id="fileLabel">Обрати файл</span>
         </label>
-        <div id="selectedFile" class="file-name"></div>
-        <button id="btnSend" class="btn primary" disabled>Надіслати</button>
+        <button id="btnSend" class="btn primary" disabled>▶ Надіслати</button>
       </div>
 
-      <div id="hostProgress" class="progress-box hidden">
-        <div class="progress-bar"><div class="progress-fill" id="hostBar"></div></div>
-        <div class="progress-info">
-          <span id="hostPct">0%</span>
-          <span id="hostSpeed">0 КБ/с</span>
+      <div id="transferArea" class="hidden">
+        <div class="progress-label">
+          <span id="sFileName">—</span>
+          <span id="sPct">0%</span>
         </div>
-        <button id="btnCancelHost" class="btn danger small">Скасувати</button>
+        <div class="progress-outer"><div class="progress-inner" id="sBar"></div></div>
+        <div class="stats">
+          <span id="sSpeed">0 КБ/с</span>
+          <span id="sDone">0 / 0</span>
+        </div>
+        <button id="btnCancelSend" class="btn danger">Скасувати</button>
       </div>
     </div>
-    <button id="btnBackHost" class="btn text">← Назад</button>
+    <button id="btnBackSender" class="btn ghost">← Назад</button>
   </section>
 
-  <!-- Екран отримувача -->
-  <section id="screen-guest" class="screen">
+  <!-- RECEIVER -->
+  <section id="receiver" class="screen">
     <div class="card">
-      <div class="status" id="guestStatus">Підключення…</div>
+      <div class="status" id="rStatus">Підключення…</div>
 
-      <div id="guestWait" class="hidden">
-        <p class="hint">Підключено. Чекаємо файл від відправника…</p>
+      <div id="waitArea">
+        <div class="spinner"></div>
+        <p class="hint">Чекаємо файл від відправника…</p>
       </div>
 
-      <div id="guestProgress" class="progress-box hidden">
-        <div class="file-name" id="guestFileName">Файл</div>
-        <div class="progress-bar"><div class="progress-fill" id="guestBar"></div></div>
-        <div class="progress-info">
-          <span id="guestPct">0%</span>
-          <span id="guestSpeed">0 КБ/с</span>
+      <div id="recvTransfer" class="hidden">
+        <div class="progress-label">
+          <span id="rFileName">—</span>
+          <span id="rPct">0%</span>
         </div>
-        <button id="btnCancelGuest" class="btn danger small">Скасувати</button>
+        <div class="progress-outer"><div class="progress-inner" id="rBar"></div></div>
+        <div class="stats">
+          <span id="rSpeed">0 КБ/с</span>
+          <span id="rDone">0 / 0</span>
+        </div>
       </div>
 
-      <div id="guestDone" class="hidden">
+      <div id="doneArea" class="hidden">
         <div class="success">✅ Файл отримано!</div>
+        <p id="doneName"></p>
         <a id="downloadLink" class="btn primary" download>Завантажити</a>
       </div>
     </div>
-    <button id="btnBackGuest" class="btn text">← Назад</button>
+    <button id="btnBackReceiver" class="btn ghost">← Назад</button>
   </section>
 </div>
 
+<div id="toast" class="toast hidden"></div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

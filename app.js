@@ -1,675 +1,299 @@
 "use strict";
-/*
- * QR-Bridge — експериментальна оптична передача файлів через потік QR-кодів.
- *
- * Формат кадру (бінарний, вшивається у QR у byte-mode):
- *
- *  DATA-кадр (type=1):
- *   [0]  magic     = 0xFA
- *   [1]  version   = 1
- *   [2]  type      = 1
- *   [3-4]  sessionId   (uint16 BE)
- *   [5-6]  K           (uint16 BE)  — загальна кількість вихідних блоків
- *   [7-8]  blockSize    (uint16 BE)  — розмір блоку в байтах
- *   [9-12] esi          (uint32 BE)  — encoding symbol id (номер кадру фонтану)
- *   [13..] payload       (blockSize байт) — XOR обраних блоків
- *
- *  META-кадр (type=0), транслюється періодично поруч із DATA-кадрами:
- *   [0]  magic, [1] version, [2] type=0
- *   [3-4]  sessionId
- *   [5-6]  K
- *   [7-8]  blockSize
- *   [9-12] fileSize    (uint32 BE)
- *   [13-16] crc32       (uint32 BE)
- *   [17]   mimeLen, [18..] mime bytes
- *   [.]    nameLen,  [..] name bytes (utf-8)
- *
- * Кодування — систематичний fountain-код:
- *  esi < K   -> кадр = вихідний блок №esi без змін (пряма передача)
- *  esi >= K  -> "репейр"-кадр: XOR degree(esi) блоків, обраних детерміновано
- *               псевдовипадковим генератором, зашитим (sessionId, esi).
- * Завдяки цьому приймач може відновити файл навіть при втраті частини кадрів —
- * достатньо отримати будь-які K "незалежних" (лінійно корисних) символів.
- */
-
-// ---------------------------------------------------------------------------
-// Утиліти: CRC32, псевдовипадковий генератор, розподіл ступеня фонтану
-// ---------------------------------------------------------------------------
-
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-
-function crc32(bytes) {
-  let c = 0xFFFFFFFF;
-  for (let i = 0; i < bytes.length; i++) {
-    c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
-  }
-  return (c ^ 0xFFFFFFFF) >>> 0;
-}
-
-// Детермінований 32-бітний PRNG (mulberry32) — і відправник, і приймач
-// отримують однакову послідовність з того самого seed, тож індекси блоків
-// репейр-символу не потрібно передавати явно — обидві сторони їх обчислюють.
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-// Спрощений розподіл ступеня (натхненний robust soliton, але без табличної
-// точності — для навчального / експериментального застосунку цього достатньо
-// в парі з систематичним префіксом).
-function pickDegree(rand, K) {
-  const r = rand();
-  if (r < 0.45) return 1;
-  if (r < 0.72) return 2;
-  if (r < 0.86) return 3;
-  const maxD = Math.max(4, Math.min(K, 10));
-  return 4 + Math.floor(rand() * (maxD - 3));
-}
-
-// Для esi>=K повертає список індексів вихідних блоків, XOR яких формує символ.
-function symbolIndices(sessionId, esi, K) {
-  if (esi < K) return [esi]; // систематична частина — блок як є
-  const seed = ((sessionId * 2654435761) ^ (esi * 40503) ^ (esi >>> 3)) >>> 0;
-  const rand = mulberry32(seed);
-  const d = Math.min(pickDegree(rand, K), K);
-  const set = new Set();
-  while (set.size < d) set.add(Math.floor(rand() * K));
-  return Array.from(set);
-}
-
-function xorInto(dst, src) {
-  for (let i = 0; i < dst.length; i++) dst[i] ^= src[i];
-}
-
-// ---------------------------------------------------------------------------
-// Кодування / декодування кадрів у бінарний Uint8Array
-// ---------------------------------------------------------------------------
-
-const MAGIC = 0xFA;
-const VERSION = 1;
-
-function encodeDataFrame(sessionId, K, blockSize, esi, payload) {
-  const buf = new Uint8Array(13 + blockSize);
-  const dv = new DataView(buf.buffer);
-  buf[0] = MAGIC; buf[1] = VERSION; buf[2] = 1;
-  dv.setUint16(3, sessionId);
-  dv.setUint16(5, K);
-  dv.setUint16(7, blockSize);
-  dv.setUint32(9, esi);
-  buf.set(payload, 13);
-  return buf;
-}
-
-function encodeMetaFrame(sessionId, K, blockSize, fileSize, crc, mime, name) {
-  const mimeB = new TextEncoder().encode(mime.slice(0, 60));
-  const nameB = new TextEncoder().encode(name.slice(0, 80));
-  const buf = new Uint8Array(17 + 1 + mimeB.length + 1 + nameB.length);
-  const dv = new DataView(buf.buffer);
-  buf[0] = MAGIC; buf[1] = VERSION; buf[2] = 0;
-  dv.setUint16(3, sessionId);
-  dv.setUint16(5, K);
-  dv.setUint16(7, blockSize);
-  dv.setUint32(9, fileSize);
-  dv.setUint32(13, crc);
-  let off = 17;
-  buf[off++] = mimeB.length; buf.set(mimeB, off); off += mimeB.length;
-  buf[off++] = nameB.length; buf.set(nameB, off); off += nameB.length;
-  return buf;
-}
-
-function decodeFrame(bytes) {
-  if (!bytes || bytes.length < 3 || bytes[0] !== MAGIC || bytes[1] !== VERSION) return null;
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const type = bytes[2];
-  if (type === 1) {
-    if (bytes.length < 13) return null;
-    const blockSize = dv.getUint16(7);
-    // payload має бути рівно blockSize (або трохи більше через padding QR — беремо рівно)
-    if (bytes.length < 13 + blockSize) return null;
-    return {
-      type: 1,
-      sessionId: dv.getUint16(3),
-      K: dv.getUint16(5),
-      blockSize,
-      esi: dv.getUint32(9),
-      payload: bytes.subarray(13, 13 + blockSize),
-    };
-  }
-  if (type === 0) {
-    if (bytes.length < 18) return null;
-    let off = 17;
-    if (off >= bytes.length) return null;
-    const mimeLen = bytes[off++];
-    if (off + mimeLen > bytes.length) return null;
-    const mime = new TextDecoder().decode(bytes.subarray(off, off + mimeLen)); off += mimeLen;
-    if (off >= bytes.length) return null;
-    const nameLen = bytes[off++];
-    if (off + nameLen > bytes.length) return null;
-    const name = new TextDecoder().decode(bytes.subarray(off, off + nameLen));
-    return {
-      type: 0,
-      sessionId: dv.getUint16(3),
-      K: dv.getUint16(5),
-      blockSize: dv.getUint16(7),
-      fileSize: dv.getUint32(9),
-      crc: dv.getUint32(13),
-      mime, name,
-    };
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Пілінг-декодер fountain-коду (peeling decoder)
-// ---------------------------------------------------------------------------
-
-class FountainDecoder {
-  constructor(K, blockSize) {
-    this.K = K;
-    this.blockSize = blockSize;
-    this.blocks = new Array(K).fill(null);
-    this.solved = 0;
-    this.pending = []; // {idxSet: Set<number>, data: Uint8Array}
-    this.seenEsi = new Set();
-    this.newBytesSinceTick = 0; // для лічильника goodput
-  }
-
-  get done() { return this.solved === this.K; }
-
-  addSymbol(esi, indices, data) {
-    if (this.seenEsi.has(esi)) return false; // дублікат кадру — ігноруємо
-    this.seenEsi.add(esi);
-
-    let idxSet = new Set(indices);
-    let buf = data.slice();
-
-    // Виключаємо вже відомі блоки з рівняння (message passing)
-    for (const idx of Array.from(idxSet)) {
-      if (this.blocks[idx]) {
-        xorInto(buf, this.blocks[idx]);
-        idxSet.delete(idx);
-      }
-    }
-
-    if (idxSet.size === 0) return false; // нічого нового
-    if (idxSet.size === 1) {
-      this._resolve(idxSet.values().next().value, buf);
-    } else {
-      this.pending.push({ idxSet, data: buf });
-      this._cascade();
-    }
-    return true;
-  }
-
-  _resolve(idx, data) {
-    if (this.blocks[idx]) return;
-    this.blocks[idx] = data;
-    this.solved++;
-    this.newBytesSinceTick += data.length;
-    this._cascade();
-  }
-
-  _cascade() {
-    let progress = true;
-    while (progress) {
-      progress = false;
-      for (let i = this.pending.length - 1; i >= 0; i--) {
-        const sym = this.pending[i];
-        for (const idx of Array.from(sym.idxSet)) {
-          if (this.blocks[idx]) {
-            xorInto(sym.data, this.blocks[idx]);
-            sym.idxSet.delete(idx);
-          }
-        }
-        if (sym.idxSet.size === 0) {
-          this.pending.splice(i, 1);
-        } else if (sym.idxSet.size === 1) {
-          const idx = sym.idxSet.values().next().value;
-          this.pending.splice(i, 1);
-          this._resolve(idx, sym.data);
-          progress = true;
-        }
-      }
-    }
-  }
-
-  assemble(fileSize) {
-    const out = new Uint8Array(fileSize);
-    for (let i = 0; i < this.K; i++) {
-      const start = i * this.blockSize;
-      const end = Math.min(start + this.blockSize, fileSize);
-      out.set(this.blocks[i].subarray(0, end - start), start);
-    }
-    return out;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// UI: перемикач режимів
-// ---------------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
 
-$("tabSender").onclick = () => setMode("sender");
-$("tabReceiver").onclick = () => setMode("receiver");
+let peer = null;
+let conn = null;
+let myId = null;
+let isSender = false;
+let currentFile = null;
+let transferAbort = false;
 
-function setMode(mode) {
-  $("tabSender").classList.toggle("active", mode === "sender");
-  $("tabReceiver").classList.toggle("active", mode === "receiver");
-  $("panelSender").classList.toggle("active", mode === "sender");
-  $("panelReceiver").classList.toggle("active", mode === "receiver");
-  if (mode !== "receiver") stopScan();
+// ---------- UI helpers ----------
+function show(screen) {
+  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
+  $(screen).classList.add("active");
 }
 
-function fmtTime(sec) {
-  sec = Math.floor(sec);
-  const m = String(Math.floor(sec / 60)).padStart(2, "0");
-  const s = String(sec % 60).padStart(2, "0");
-  return `${m}:${s}`;
+function toast(msg, ms = 3000) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  setTimeout(() => t.classList.add("hidden"), ms);
 }
 
-// ---------------------------------------------------------------------------
-// ВІДПРАВНИК
-// ---------------------------------------------------------------------------
-
-let sendState = null; // активна сесія трансляції
-
-$("fileInput").addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const sizeKb = (file.size / 1024).toFixed(1);
-  $("fileLabel").textContent = `${file.name} (${sizeKb} КБ)`;
-  $("btnStartSend").disabled = false;
-  sendState = { file, running: false };
-
-  // Оптична передача повільна — попереджаємо про великі файли
-  if (file.size > 300 * 1024) {
-    $("sHint").textContent = `⚠ Файл ${sizeKb} КБ завеликий для швидкої передачі. Краще ≤ 100–200 КБ або зменшіть розмір блоку.`;
-    $("sHint").className = "hint error";
-  } else {
-    $("sHint").textContent = "Файл обрано. Натисніть «Почати трансляцію».";
-    $("sHint").className = "hint";
-  }
-});
-
-$("btnStartSend").onclick = async () => {
-  if (!sendState || !sendState.file) return;
-  const file = sendState.file;
-  const blockSize = parseInt($("blockSizeSel").value, 10);
-  const fps = parseInt($("fpsSel").value, 10);
-
-  const buf = new Uint8Array(await file.arrayBuffer());
-  const K = Math.ceil(buf.length / blockSize) || 1;
-  const crc = crc32(buf);
-  const sessionId = Math.floor(Math.random() * 65536);
-
-  // Нарізаємо файл на K блоків фіксованого розміру (останній доповнюємо нулями)
-  const blocks = [];
-  for (let i = 0; i < K; i++) {
-    const b = new Uint8Array(blockSize);
-    const start = i * blockSize;
-    b.set(buf.subarray(start, Math.min(start + blockSize, buf.length)));
-    blocks.push(b);
-  }
-
-  sendState = {
-    file, blocks, K, blockSize, crc, sessionId, fps,
-    fileSize: buf.length,
-    esi: 0,
-    framesSent: 0,
-    running: true,
-    frameInterval: 1000 / fps,
-    lastFrameTime: 0,
-    fpsCounter: 0, fpsLastCheck: performance.now(), fpsDisplay: 0,
-    startTime: performance.now(),
-    bytesSent: 0, goodputLastCheck: performance.now(), goodputDisplay: 0,
-  };
-
-  $("btnStartSend").disabled = true;
-  $("btnStopSend").disabled = false;
-  $("fileInput").disabled = true;
-  $("sHint").textContent = `Трансляція… K=${K} блоків. Наведіть камеру приймача на QR.`;
-  $("sHint").className = "hint";
-
-  requestAnimationFrame(sendLoop);
-};
-
-$("btnStopSend").onclick = () => {
-  if (sendState) sendState.running = false;
-  $("btnStartSend").disabled = false;
-  $("btnStopSend").disabled = true;
-  $("fileInput").disabled = false;
-  $("sHint").textContent = "Трансляцію зупинено.";
-};
-
-function sendLoop(now) {
-  if (!sendState || !sendState.running) return;
-  try {
-    sendTick(now);
-  } catch (e) {
-    console.error("sendLoop error:", e);
-    $("sHint").textContent = "⚠ Помилка трансляції: " + e.message;
-    $("sHint").className = "hint error";
-  }
-  requestAnimationFrame(sendLoop);
+function fmtSize(b) {
+  if (b < 1024) return b + " B";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " КБ";
+  return (b / 1048576).toFixed(2) + " МБ";
 }
 
-function sendTick(now) {
-  const st = sendState;
-
-  if (now - st.lastFrameTime >= st.frameInterval) {
-    st.lastFrameTime = now;
-
-    // Кожен 8-й кадр — метадані файлу (ім'я, тип, розмір, контрольна сума)
-    const isMeta = (st.esi % 8 === 7);
-    let frameBytes;
-    if (isMeta) {
-      frameBytes = encodeMetaFrame(
-        st.sessionId, st.K, st.blockSize, st.fileSize, st.crc,
-        st.file.type || "application/octet-stream", st.file.name
-      );
-    } else {
-      const indices = symbolIndices(st.sessionId, st.esi, st.K);
-      const payload = new Uint8Array(st.blockSize);
-      for (const idx of indices) xorInto(payload, st.blocks[idx]);
-      frameBytes = encodeDataFrame(st.sessionId, st.K, st.blockSize, st.esi, payload);
-      st.esi++;
-    }
-
-    renderQR(frameBytes);
-    st.framesSent++;
-    st.bytesSent += frameBytes.length;
-    st.fpsCounter++;
-
-    // Прогрес: скільки систематичних блоків уже «пройшло» (орієнтир)
-    const sysDone = Math.min(st.esi, st.K);
-    const pct = Math.min(100, Math.round((sysDone / st.K) * 100));
-    $("sProgress").textContent = pct + "%";
-    $("sProgressBar").style.width = pct + "%";
-  }
-
-  // Оновлення статистики раз на секунду
-  if (now - st.fpsLastCheck >= 1000) {
-    st.fpsDisplay = st.fpsCounter;
-    st.fpsCounter = 0;
-    st.fpsLastCheck = now;
-    const kb = st.bytesSent / 1024;
-    st.goodputDisplay = kb.toFixed(1);
-    st.bytesSent = 0;
-
-    $("sFps").textContent = st.fpsDisplay;
-    $("sGoodput").textContent = st.goodputDisplay;
-    $("sTimer").textContent = fmtTime((now - st.startTime) / 1000);
-  }
-}
-
-function renderQR(bytes) {
-  if (typeof QRCode === "undefined" || typeof QRCode.toCanvas !== "function") {
-    throw new Error("Бібліотека QRCode не завантажена (перевірте інтернет-з'єднання).");
-  }
-  const canvas = $("qrCanvas");
-  // Фіксований width дає стабільний розмір модулів. ECC M краще переносить
-  // відблиски/розмиття з екрана телефону, ніж L. Margin 2 — більше quiet zone.
-  QRCode.toCanvas(
-    canvas,
-    [{ data: Array.from(bytes), mode: "byte" }],
-    {
-      errorCorrectionLevel: "M",
-      margin: 2,
-      width: 360,
-      color: { dark: "#000000", light: "#ffffff" }
-    },
-    (err) => {
-      if (err) {
-        console.error("QR render error:", err);
-        $("sHint").textContent = "⚠ Помилка рендеру QR: " + err.message;
-        $("sHint").className = "hint error";
+// ---------- Peer setup ----------
+function createPeer(id) {
+  return new Promise((resolve, reject) => {
+    const p = new Peer(id, {
+      debug: 1,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" }
+        ]
       }
-    }
-  );
+    });
+    p.on("open", (pid) => {
+      myId = pid;
+      resolve(p);
+    });
+    p.on("error", (err) => {
+      console.error(err);
+      reject(err);
+    });
+  });
 }
 
-// ---------------------------------------------------------------------------
-// ОТРИМУВАЧ
-// ---------------------------------------------------------------------------
+// ---------- SENDER ----------
+$("btnCreate").onclick = async () => {
+  show("sender");
+  $("sStatus").textContent = "Створення кімнати…";
+  $("fileArea").classList.add("hidden");
+  $("transferArea").classList.add("hidden");
 
-let recvState = null;
-let mediaStream = null;
-let scanRAF = null;
+  try {
+    // короткий читабельний id
+    const shortId = Math.random().toString(36).slice(2, 8).toUpperCase();
+    peer = await createPeer(shortId);
+    isSender = true;
 
-$("btnStartScan").onclick = startScan;
-$("btnStopScan").onclick = stopScan;
-$("btnResetRecv").onclick = () => {
-  initReceiverState();
-  $("rHint").textContent = "Стан скинуто.";
-  $("rHint").className = "hint";
+    $("roomCode").textContent = peer.id;
+    $("sStatus").textContent = "Очікуємо підключення…";
+
+    // QR з кодом
+    QRCode.toCanvas($("qrCanvas"), peer.id, {
+      width: 220,
+      margin: 1,
+      color: { dark: "#000", light: "#fff" }
+    });
+
+    peer.on("connection", (c) => {
+      conn = c;
+      setupConnection(c);
+      $("sStatus").textContent = "Підключено! Оберіть файл";
+      $("fileArea").classList.remove("hidden");
+      toast("Отримувач підключився");
+    });
+  } catch (e) {
+    $("sStatus").textContent = "Помилка: " + e.message;
+    toast("Не вдалося створити кімнату");
+  }
 };
 
-function initReceiverState() {
-  recvState = {
-    sessionId: null,
-    decoder: null,
-    meta: null,
-    startTime: performance.now(),
-    scanCount: 0, fpsLastCheck: performance.now(), fpsDisplay: 0,
-    newBytesLastCheck: performance.now(), goodputDisplay: 0,
-    lastValidFrameAt: 0,
-    lastAnyQrAt: 0,
-    completed: false,
-  };
-  $("rProgress").textContent = "0%";
-  $("rProgressBar").style.width = "0%";
-}
-initReceiverState();
+$("fileInput").onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  currentFile = f;
+  $("fileLabel").textContent = `${f.name} (${fmtSize(f.size)})`;
+  $("btnSend").disabled = false;
+};
 
-async function startScan() {
+$("btnSend").onclick = () => {
+  if (!conn || !currentFile) return;
+  sendFile(currentFile);
+};
+
+$("btnCancelSend").onclick = () => {
+  transferAbort = true;
+  if (conn) conn.send({ type: "abort" });
+  $("transferArea").classList.add("hidden");
+  $("fileArea").classList.remove("hidden");
+  toast("Передачу скасовано");
+};
+
+$("btnBackSender").onclick = () => {
+  cleanup();
+  show("home");
+};
+
+// ---------- RECEIVER ----------
+$("btnJoin").onclick = joinRoom;
+$("joinCode").onkeydown = (e) => { if (e.key === "Enter") joinRoom(); };
+
+async function joinRoom() {
+  const code = $("joinCode").value.trim().toUpperCase();
+  if (!code) return toast("Введіть код");
+
+  show("receiver");
+  $("rStatus").textContent = "Підключення…";
+  $("waitArea").classList.remove("hidden");
+  $("recvTransfer").classList.add("hidden");
+  $("doneArea").classList.add("hidden");
+
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "environment",
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false,
+    peer = await createPeer(); // random id
+    isSender = false;
+
+    conn = peer.connect(code, { reliable: true });
+    setupConnection(conn);
+
+    conn.on("open", () => {
+      $("rStatus").textContent = "Підключено. Чекаємо файл…";
+      toast("З’єднано з відправником");
     });
-  } catch (err) {
-    $("rHint").textContent = "Не вдалося отримати доступ до камери: " + err.message;
-    $("rHint").className = "hint error";
-    return;
-  }
-  const video = $("video");
-  video.srcObject = mediaStream;
-  await video.play();
-
-  if (!recvState || recvState.completed) initReceiverState();
-
-  $("btnStartScan").disabled = true;
-  $("btnStopScan").disabled = false;
-  $("rHint").textContent = "Сканування… тримайте QR рівно в кадрі, мінімум відблисків.";
-  $("rHint").className = "hint";
-
-  scanRAF = requestAnimationFrame(scanLoop);
-}
-
-function stopScan() {
-  if (scanRAF) cancelAnimationFrame(scanRAF);
-  scanRAF = null;
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-  }
-  $("btnStartScan").disabled = false;
-  $("btnStopScan").disabled = true;
-  setLock(false);
-}
-
-function setLock(on, partial) {
-  const badge = $("lockBadge");
-  if (on) {
-    badge.textContent = "СИНХРОНІЗОВАНО";
-    badge.className = "lock-badge locked";
-  } else if (partial) {
-    badge.textContent = "QR ВИДНО";
-    badge.className = "lock-badge partial";
-  } else {
-    badge.textContent = "НЕМАЄ СИГНАЛУ";
-    badge.className = "lock-badge lost";
-  }
-}
-
-const captureCanvas = $("captureCanvas");
-const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
-
-function scanLoop(now) {
-  if (!mediaStream) return;
-  try {
-    scanTick(now);
   } catch (e) {
-    console.error("scanLoop error:", e);
-    $("rHint").textContent = "⚠ Помилка сканування: " + e.message;
-    $("rHint").className = "hint error";
-  }
-  scanRAF = requestAnimationFrame(scanLoop);
-}
-
-function scanTick(now) {
-  if (typeof jsQR === "undefined") {
-    throw new Error("Бібліотека jsQR не завантажена (перевірте інтернет-з'єднання).");
-  }
-  const video = $("video");
-
-  if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    // Обмежуємо розмір для швидкості (jsQR важкий на великих кадрах)
-    const maxDim = 720;
-    let w = video.videoWidth;
-    let h = video.videoHeight;
-    if (w > maxDim || h > maxDim) {
-      const scale = maxDim / Math.max(w, h);
-      w = Math.round(w * scale);
-      h = Math.round(h * scale);
-    }
-    captureCanvas.width = w;
-    captureCanvas.height = h;
-    captureCtx.drawImage(video, 0, 0, w, h);
-    const imgData = captureCtx.getImageData(0, 0, w, h);
-
-    // attemptBoth допомагає при відблисках і різному контрасті екрана
-    const code = jsQR(imgData.data, imgData.width, imgData.height, {
-      inversionAttempts: "attemptBoth"
-    });
-    recvState.scanCount++;
-
-    if (code) {
-      recvState.lastAnyQrAt = now;
-      const bytes = code.binaryData
-        ? Uint8Array.from(code.binaryData)
-        : Uint8Array.from(Array.from(code.data).map((c) => c.charCodeAt(0) & 0xFF));
-      const accepted = handleFrame(bytes, now);
-      if (!accepted && (!recvState.decoder || recvState.decoder.solved === 0)) {
-        $("rHint").textContent = "QR видно, але кадр ще не розпізнано як наш. Тримайте рівніше / ближче.";
-      }
-    }
-  }
-
-  // Статистика раз на секунду
-  if (now - recvState.fpsLastCheck >= 1000) {
-    recvState.fpsDisplay = recvState.scanCount;
-    recvState.scanCount = 0;
-    recvState.fpsLastCheck = now;
-
-    const decoder = recvState.decoder;
-    const newBytes = decoder ? decoder.newBytesSinceTick : 0;
-    if (decoder) decoder.newBytesSinceTick = 0;
-    recvState.goodputDisplay = (newBytes / 1024).toFixed(1);
-
-    const hasValid = now - recvState.lastValidFrameAt < 1500;
-    const hasAny = now - recvState.lastAnyQrAt < 1200;
-    setLock(hasValid, hasAny && !hasValid);
-
-    $("rFps").textContent = recvState.fpsDisplay;
-    $("rGoodput").textContent = recvState.goodputDisplay;
-    $("rTimer").textContent = fmtTime((now - recvState.startTime) / 1000);
-
-    if (decoder) {
-      const pct = Math.round((decoder.solved / decoder.K) * 100);
-      $("rProgress").textContent = pct + "%";
-      $("rProgressBar").style.width = pct + "%";
-    }
+    $("rStatus").textContent = "Помилка: " + e.message;
+    toast("Не вдалося підключитися");
   }
 }
 
-function handleFrame(bytes, now) {
-  const frame = decodeFrame(bytes);
-  if (!frame) return false;
+$("btnBackReceiver").onclick = () => {
+  cleanup();
+  show("home");
+};
 
-  const st = recvState;
-
-  if (st.sessionId !== null && st.sessionId !== frame.sessionId && !st.completed) {
-    initReceiverState();
-  }
-  if (st.sessionId === null) st.sessionId = frame.sessionId;
-  if (st.sessionId !== frame.sessionId) return false;
-
-  st.lastValidFrameAt = now;
-
-  if (frame.type === 0) {
-    if (!st.meta) {
-      st.meta = frame;
-      if (!st.decoder) st.decoder = new FountainDecoder(frame.K, frame.blockSize);
-      $("rHint").textContent = `Отримано мета: «${frame.name}» (${(frame.fileSize/1024).toFixed(1)} КБ)`;
-      $("rHint").className = "hint";
+// ---------- Connection & transfer ----------
+function setupConnection(c) {
+  c.on("data", (data) => {
+    if (data.type === "meta") {
+      startReceive(data);
+    } else if (data.type === "chunk") {
+      onChunk(data);
+    } else if (data.type === "done") {
+      finishReceive();
+    } else if (data.type === "abort") {
+      toast("Відправник скасував передачу");
+      $("recvTransfer").classList.add("hidden");
+      $("waitArea").classList.remove("hidden");
     }
-  } else if (frame.type === 1) {
-    if (!st.decoder) st.decoder = new FountainDecoder(frame.K, frame.blockSize);
-    // payload має бути рівно blockSize
-    if (frame.payload.length !== frame.blockSize) return false;
-    const indices = symbolIndices(frame.sessionId, frame.esi, frame.K);
-    st.decoder.addSymbol(frame.esi, indices, frame.payload);
-  }
+  });
 
-  if (st.decoder && st.decoder.done && st.meta && !st.completed) {
-    finishTransfer();
-  }
-  return true;
+  c.on("close", () => {
+    toast("З’єднання розірвано");
+  });
+
+  c.on("error", (err) => {
+    console.error(err);
+    toast("Помилка з’єднання");
+  });
 }
 
-function finishTransfer() {
-  const st = recvState;
-  st.completed = true;
-  const fileBytes = st.decoder.assemble(st.meta.fileSize);
-  const gotCrc = crc32(fileBytes);
+// Sender side
+async function sendFile(file) {
+  transferAbort = false;
+  $("fileArea").classList.add("hidden");
+  $("transferArea").classList.remove("hidden");
+  $("sFileName").textContent = file.name;
+  $("sPct").textContent = "0%";
+  $("sBar").style.width = "0%";
+  $("sDone").textContent = `0 / ${fmtSize(file.size)}`;
 
-  if (gotCrc !== st.meta.crc) {
-    $("rHint").textContent = "Помилка: контрольна сума не збігається. Продовжуємо прийом…";
-    $("rHint").className = "hint error";
-    st.completed = false;
-    return;
+  // meta
+  conn.send({
+    type: "meta",
+    name: file.name,
+    size: file.size,
+    mime: file.type || "application/octet-stream"
+  });
+
+  const chunkSize = 16 * 1024; // 16 KB
+  let offset = 0;
+  let lastTime = performance.now();
+  let lastBytes = 0;
+
+  while (offset < file.size && !transferAbort) {
+    const slice = file.slice(offset, offset + chunkSize);
+    const buf = await slice.arrayBuffer();
+    conn.send({ type: "chunk", data: buf, offset });
+
+    offset += buf.byteLength;
+    const pct = Math.round((offset / file.size) * 100);
+    $("sPct").textContent = pct + "%";
+    $("sBar").style.width = pct + "%";
+    $("sDone").textContent = `${fmtSize(offset)} / ${fmtSize(file.size)}`;
+
+    const now = performance.now();
+    if (now - lastTime > 500) {
+      const speed = ((offset - lastBytes) / ((now - lastTime) / 1000)) / 1024;
+      $("sSpeed").textContent = speed.toFixed(1) + " КБ/с";
+      lastTime = now;
+      lastBytes = offset;
+    }
+
+    // backpressure
+    await new Promise((r) => setTimeout(r, 0));
   }
 
-  const blob = new Blob([fileBytes], { type: st.meta.mime || "application/octet-stream" });
+  if (!transferAbort) {
+    conn.send({ type: "done" });
+    toast("Файл надіслано!");
+    $("sStatus").textContent = "Готово ✅";
+  }
+}
+
+// Receiver side
+let recvMeta = null;
+let recvChunks = [];
+let recvReceived = 0;
+let recvLastTime = 0;
+let recvLastBytes = 0;
+
+function startReceive(meta) {
+  recvMeta = meta;
+  recvChunks = [];
+  recvReceived = 0;
+  recvLastTime = performance.now();
+  recvLastBytes = 0;
+
+  $("waitArea").classList.add("hidden");
+  $("recvTransfer").classList.remove("hidden");
+  $("doneArea").classList.add("hidden");
+  $("rFileName").textContent = meta.name;
+  $("rPct").textContent = "0%";
+  $("rBar").style.width = "0%";
+  $("rDone").textContent = `0 / ${fmtSize(meta.size)}`;
+  $("rStatus").textContent = "Отримання…";
+}
+
+function onChunk(msg) {
+  if (!recvMeta) return;
+  recvChunks.push(new Uint8Array(msg.data));
+  recvReceived += msg.data.byteLength;
+
+  const pct = Math.round((recvReceived / recvMeta.size) * 100);
+  $("rPct").textContent = pct + "%";
+  $("rBar").style.width = pct + "%";
+  $("rDone").textContent = `${fmtSize(recvReceived)} / ${fmtSize(recvMeta.size)}`;
+
+  const now = performance.now();
+  if (now - recvLastTime > 500) {
+    const speed = ((recvReceived - recvLastBytes) / ((now - recvLastTime) / 1000)) / 1024;
+    $("rSpeed").textContent = speed.toFixed(1) + " КБ/с";
+    recvLastTime = now;
+    recvLastBytes = recvReceived;
+  }
+}
+
+function finishReceive() {
+  if (!recvMeta) return;
+  const blob = new Blob(recvChunks, { type: recvMeta.mime });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = st.meta.name || "received_file";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-  $("rHint").textContent = `✅ Файл «${st.meta.name}» отримано та збережено!`;
-  $("rHint").className = "hint success";
-  stopScan();
+  $("recvTransfer").classList.add("hidden");
+  $("doneArea").classList.remove("hidden");
+  $("doneName").textContent = recvMeta.name + " (" + fmtSize(recvMeta.size) + ")";
+  const a = $("downloadLink");
+  a.href = url;
+  a.download = recvMeta.name;
+  $("rStatus").textContent = "Готово ✅";
+  toast("Файл отримано!");
 }
+
+function cleanup() {
+  if (conn) { try { conn.close(); } catch (_) {} conn = null; }
+  if (peer) { try { peer.destroy(); } catch (_) {} peer = null; }
+  currentFile = null;
+  transferAbort = false;
+  recvMeta = null;
+  recvChunks = [];
+}
+
+// start
+show("home");
