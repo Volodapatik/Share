@@ -22,7 +22,19 @@
       <input id="joinCode" type="text" placeholder="Код кімнати" maxlength="20" autocomplete="off">
       <button id="btnJoin" class="btn secondary">📥 Приєднатися</button>
     </div>
+    <button id="btnScanQR" class="btn ghost" style="margin-top:12px">📷 Сканувати QR</button>
     <p class="hint">Один QR — і файл летить по Wi-Fi</p>
+  </section>
+
+  <!-- SCANNER -->
+  <section id="scanner" class="screen">
+    <div class="card">
+      <div class="status">Наведіть камеру на QR</div>
+      <div class="video-wrap">
+        <video id="scanVideo" playsinline muted autoplay></video>
+      </div>
+      <button id="btnStopScan" class="btn secondary">Скасувати</button>
+    </div>
   </section>
 
   <!-- SENDER -->
@@ -37,9 +49,10 @@
 
       <div id="fileArea" class="hidden">
         <label class="file-picker">
-          <input type="file" id="fileInput" hidden>
-          <span id="fileLabel">Обрати файл</span>
+          <input type="file" id="fileInput" multiple hidden>
+          <span id="fileLabel">Обрати файли</span>
         </label>
+        <ul id="fileList" class="file-list"></ul>
         <button id="btnSend" class="btn primary" disabled>▶ Надіслати</button>
       </div>
 
@@ -53,6 +66,7 @@
           <span id="sSpeed">0 КБ/с</span>
           <span id="sDone">0 / 0</span>
         </div>
+        <div id="sFileProgress" class="file-progress"></div>
         <button id="btnCancelSend" class="btn danger">Скасувати</button>
       </div>
     </div>
@@ -66,7 +80,7 @@
 
       <div id="waitArea">
         <div class="spinner"></div>
-        <p class="hint">Чекаємо файл від відправника…</p>
+        <p class="hint">Чекаємо файли від відправника…</p>
       </div>
 
       <div id="recvTransfer" class="hidden">
@@ -79,12 +93,12 @@
           <span id="rSpeed">0 КБ/с</span>
           <span id="rDone">0 / 0</span>
         </div>
+        <div id="rFileProgress" class="file-progress"></div>
       </div>
 
       <div id="doneArea" class="hidden">
-        <div class="success">✅ Файл отримано!</div>
-        <p id="doneName"></p>
-        <a id="downloadLink" class="btn primary" download>Завантажити</a>
+        <div class="success">✅ Файли отримано!</div>
+        <div id="doneList"></div>
       </div>
     </div>
     <button id="btnBackReceiver" class="btn ghost">← Назад</button>
@@ -92,9 +106,11 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
+<canvas id="scanCanvas" hidden></canvas>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
