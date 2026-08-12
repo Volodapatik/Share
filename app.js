@@ -219,10 +219,7 @@ function scanLoop() {
 
 // ---------- Connection & transfer ----------
 function setupConnection(c) {
-  // Prefer binary serialization for speed
-  if (c.serialization !== "binary") {
-    try { c.serialization = "binary"; } catch (_) {}
-  }
+  try { c.serialization = "binary"; } catch (_) {}
 
   c.on("data", (data) => {
     if (data.type === "meta") {
@@ -248,7 +245,7 @@ function setupConnection(c) {
   });
 }
 
-function waitForBuffer(maxBuffered = 4 * 1024 * 1024) {
+function waitForBuffer(maxBuffered = 8 * 1024 * 1024) {
   return new Promise((resolve) => {
     const dc = conn && conn.dataChannel;
     if (!dc || dc.bufferedAmount < maxBuffered) {
@@ -256,10 +253,10 @@ function waitForBuffer(maxBuffered = 4 * 1024 * 1024) {
       return;
     }
     const check = () => {
-      if (!conn || transferAbort || !dc || dc.bufferedAmount < maxBuffered * 0.4) {
+      if (!conn || transferAbort || !dc || dc.bufferedAmount < maxBuffered * 0.35) {
         resolve();
       } else {
-        setTimeout(check, 20);
+        setTimeout(check, 15);
       }
     };
     check();
@@ -271,8 +268,7 @@ async function sendFiles(files) {
   $("fileArea").classList.add("hidden");
   $("transferArea").classList.remove("hidden");
 
-  // Більші чанки = менше накладних витрат PeerJS
-  const chunkSize = 256 * 1024; // 256 KB
+  const chunkSize = 512 * 1024; // 512 KB
 
   for (let i = 0; i < files.length && !transferAbort; i++) {
     const file = files[i];
@@ -309,7 +305,7 @@ async function sendFiles(files) {
       $("sDone").textContent = `${fmtSize(offset)} / ${fmtSize(file.size)}`;
 
       const now = performance.now();
-      if (now - lastTime > 250) {
+      if (now - lastTime > 200) {
         const speed = ((offset - lastBytes) / ((now - lastTime) / 1000)) / 1024;
         $("sSpeed").textContent = speed.toFixed(1) + " КБ/с";
         lastTime = now;
@@ -377,7 +373,7 @@ function onChunk(msg) {
   $("rDone").textContent = `${fmtSize(cur.received)} / ${fmtSize(cur.size)}`;
 
   const now = performance.now();
-  if (now - cur.lastTime > 250) {
+  if (now - cur.lastTime > 200) {
     const speed = ((cur.received - cur.lastBytes) / ((now - cur.lastTime) / 1000)) / 1024;
     $("rSpeed").textContent = speed.toFixed(1) + " КБ/с";
     cur.lastTime = now;
