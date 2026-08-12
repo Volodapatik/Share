@@ -3,183 +3,89 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>QR-Bridge — оптична передача файлів</title>
+<title>Share — швидка передача файлів</title>
 <link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 </head>
 <body>
 
-<header class="topbar">
-  <h1>QR-Bridge</h1>
-  <div class="mode-switch" role="tablist">
-    <button id="tabSender" class="mode-btn active" role="tab">📤 Відправник</button>
-    <button id="tabReceiver" class="mode-btn" role="tab">📥 Отримувач</button>
-  </div>
-</header>
+<div class="app">
+  <header>
+    <h1>Share</h1>
+    <p class="subtitle">Швидка передача файлів між телефонами</p>
+  </header>
 
-<section id="panelSender" class="panel active">
-  <div class="card">
-    <label class="file-picker">
-      <input type="file" id="fileInput" hidden>
-      <span id="fileLabel">Обрати файл для передачі…</span>
-    </label>
-
-    <div class="settings-row">
-      <label>Розмір блоку
-        <select id="blockSizeSel">
-          <option value="60">60 B (максимально надійно)</option>
-          <option value="80">80 B (надійно)</option>
-          <option value="120" selected>120 B (баланс)</option>
-          <option value="180">180 B (швидко)</option>
-        </select>
-      </label>
-      <label>FPS кадрів
-        <select id="fpsSel">
-          <option value="8">8</option>
-          <option value="10">10</option>
-          <option value="12" selected>12</option>
-          <option value="15">15</option>
-          <option value="20">20</option>
-        </select>
-      </label>
+  <!-- Головний екран -->
+  <section id="screen-home" class="screen active">
+    <div class="card">
+      <button id="btnCreate" class="btn primary big">Створити кімнату</button>
+      <div class="divider">або</div>
+      <div class="join-box">
+        <input type="text" id="joinCode" placeholder="Код кімнати" maxlength="16" autocomplete="off">
+        <button id="btnJoin" class="btn secondary">Приєднатися</button>
+      </div>
     </div>
+    <p class="hint">Обидва пристрої мають бути в інтернеті. Файл йде напряму (P2P).</p>
+  </section>
 
-    <div class="qr-wrap">
-      <canvas id="qrCanvas" width="360" height="360"></canvas>
+  <!-- Екран відправника (створив кімнату) -->
+  <section id="screen-host" class="screen">
+    <div class="card">
+      <div class="status" id="hostStatus">Очікуємо підключення…</div>
+      <div class="code-box" id="hostCode">—</div>
+      <canvas id="qrCanvas" width="220" height="220"></canvas>
+      <p class="hint">Покажи QR або код другому телефону</p>
+
+      <div id="hostFileArea" class="hidden">
+        <label class="file-btn">
+          <input type="file" id="fileInput" hidden>
+          <span>Обрати файл</span>
+        </label>
+        <div id="selectedFile" class="file-name"></div>
+        <button id="btnSend" class="btn primary" disabled>Надіслати</button>
+      </div>
+
+      <div id="hostProgress" class="progress-box hidden">
+        <div class="progress-bar"><div class="progress-fill" id="hostBar"></div></div>
+        <div class="progress-info">
+          <span id="hostPct">0%</span>
+          <span id="hostSpeed">0 КБ/с</span>
+        </div>
+        <button id="btnCancelHost" class="btn danger small">Скасувати</button>
+      </div>
     </div>
+    <button id="btnBackHost" class="btn text">← Назад</button>
+  </section>
 
-    <div class="controls">
-      <button id="btnStartSend" class="btn primary" disabled>▶ Почати трансляцію</button>
-      <button id="btnStopSend" class="btn danger" disabled>■ Стоп</button>
+  <!-- Екран отримувача -->
+  <section id="screen-guest" class="screen">
+    <div class="card">
+      <div class="status" id="guestStatus">Підключення…</div>
+
+      <div id="guestWait" class="hidden">
+        <p class="hint">Підключено. Чекаємо файл від відправника…</p>
+      </div>
+
+      <div id="guestProgress" class="progress-box hidden">
+        <div class="file-name" id="guestFileName">Файл</div>
+        <div class="progress-bar"><div class="progress-fill" id="guestBar"></div></div>
+        <div class="progress-info">
+          <span id="guestPct">0%</span>
+          <span id="guestSpeed">0 КБ/с</span>
+        </div>
+        <button id="btnCancelGuest" class="btn danger small">Скасувати</button>
+      </div>
+
+      <div id="guestDone" class="hidden">
+        <div class="success">✅ Файл отримано!</div>
+        <a id="downloadLink" class="btn primary" download>Завантажити</a>
+      </div>
     </div>
-  </div>
-
-  <div class="stats-bar" id="statsSender">
-    <div class="stat"><span class="stat-val" id="sFps">0</span><span class="stat-lbl">FPS</span></div>
-    <div class="stat"><span class="stat-val" id="sGoodput">0</span><span class="stat-lbl">КБ/с</span></div>
-    <div class="stat"><span class="stat-val" id="sProgress">0%</span><span class="stat-lbl">Прогрес</span></div>
-    <div class="stat"><span class="stat-val" id="sTimer">00:00</span><span class="stat-lbl">Час</span></div>
-  </div>
-  <div class="progress-outer"><div class="progress-inner" id="sProgressBar"></div></div>
-  <p class="hint" id="sHint">Оберіть невеликий файл (краще ≤ 200 КБ), щоб почати.</p>
-</section>
-
-<section id="panelReceiver" class="panel">
-  <div class="card">
-    <div class="video-wrap">
-      <video id="video" playsinline muted autoplay></video>
-      <canvas id="scanOverlay"></canvas>
-      <div id="lockBadge" class="lock-badge lost">НЕМАЄ СИГНАЛУ</div>
-    </div>
-
-    <div class="controls">
-      <button id="btnStartScan" class="btn primary">▶ Увімкнути камеру</button>
-      <button id="btnStopScan" class="btn danger" disabled>■ Стоп</button>
-      <button id="btnResetRecv" class="btn secondary">↺ Скинути</button>
-    </div>
-  </div>
-
-  <div class="stats-bar" id="statsReceiver">
-    <div class="stat"><span class="stat-val" id="rFps">0</span><span class="stat-lbl">FPS</span></div>
-    <div class="stat"><span class="stat-val" id="rGoodput">0</span><span class="stat-lbl">КБ/с</span></div>
-    <div class="stat"><span class="stat-val" id="rProgress">0%</span><span class="stat-lbl">Прогрес</span></div>
-    <div class="stat"><span class="stat-val" id="rTimer">00:00</span><span class="stat-lbl">Час</span></div>
-  </div>
-  <div class="progress-outer"><div class="progress-inner" id="rProgressBar"></div></div>
-  <p class="hint" id="rHint">Наведіть камеру на екран відправника. Тримайте рівно, уникайте відблисків.</p>
-</section>
-
-<canvas id="captureCanvas" hidden></canvas>
-
-<div id="errBanner" class="err-banner" hidden>
-  <div id="errText"></div>
-  <button id="errClose" type="button" aria-label="Закрити">✕</button>
+    <button id="btnBackGuest" class="btn text">← Назад</button>
+  </section>
 </div>
 
-<script>
-(function () {
-  let errorDismissedUntil = 0;
-
-  function loadScript(url) {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = url;
-      s.onload = () => resolve(url);
-      s.onerror = () => reject(new Error("Не вдалося завантажити: " + url));
-      document.head.appendChild(s);
-    });
-  }
-  async function loadWithFallback(name, mirrors) {
-    let lastErr;
-    for (const url of mirrors) {
-      try {
-        await loadScript(url);
-        console.log(name + " OK from " + url);
-        return;
-      } catch (e) {
-        lastErr = e;
-        console.warn(e.message);
-      }
-    }
-    throw lastErr || new Error("Не вдалося завантажити " + name);
-  }
-
-  function showFatal(msg) {
-    // Якщо користувач закрив банер — не показуємо знову найближчі 30 секунд
-    if (Date.now() < errorDismissedUntil) return;
-    const b = document.getElementById("errBanner");
-    document.getElementById("errText").textContent = msg;
-    b.hidden = false;
-  }
-
-  function hideFatal() {
-    document.getElementById("errBanner").hidden = true;
-    errorDismissedUntil = Date.now() + 30000; // 30 сек тиші
-  }
-
-  (async () => {
-    try {
-      await loadWithFallback("qrcode", [
-        "https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js",
-        "https://fastly.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js",
-        "https://cdn.jsdelivr.net/npm/qrcode@1.4.4/build/qrcode.min.js",
-        "https://unpkg.com/qrcode@1.5.1/build/qrcode.min.js"
-      ]);
-      if (typeof QRCode === "undefined" || typeof QRCode.toCanvas !== "function") {
-        throw new Error("QRCode.toCanvas недоступний");
-      }
-      await loadWithFallback("jsQR", [
-        "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
-        "https://fastly.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
-        "https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"
-      ]);
-      if (typeof jsQR === "undefined") {
-        throw new Error("jsQR недоступний");
-      }
-      await loadScript("app.js");
-    } catch (e) {
-      showFatal("⚠ " + e.message);
-      console.error(e);
-    }
-  })();
-
-  // Показуємо тільки реальні помилки, не спамимо
-  window.addEventListener("error", (e) => {
-    if (e.message && !e.message.includes("Script error")) {
-      showFatal("⚠ " + e.message);
-    }
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    const msg = (e.reason && e.reason.message) || String(e.reason || "Unknown");
-    showFatal("⚠ " + msg);
-  });
-
-  const closeBtn = document.getElementById("errClose");
-  closeBtn.addEventListener("click", hideFatal);
-  closeBtn.addEventListener("touchend", (e) => {
-    e.preventDefault();
-    hideFatal();
-  });
-})();
-</script>
+<script src="app.js"></script>
 </body>
 </html>
