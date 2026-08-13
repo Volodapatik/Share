@@ -185,6 +185,11 @@ header h1 {
   font-size: 13px;
   color: var(--muted);
 }
+.time-stats {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
 
 .file-progress {
   margin-top: 12px;

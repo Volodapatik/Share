@@ -30,6 +30,13 @@ function fmtSize(b) {
   return (b / 1048576).toFixed(2) + " МБ";
 }
 
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = String(Math.floor(sec / 60)).padStart(2, "0");
+  const s = String(sec % 60).padStart(2, "0");
+  return `${m}:${s}`;
+}
+
 // ---------- Peer setup ----------
 function createPeer(id) {
   return new Promise((resolve, reject) => {
@@ -268,7 +275,8 @@ async function sendFiles(files) {
   $("fileArea").classList.add("hidden");
   $("transferArea").classList.remove("hidden");
 
-  const chunkSize = 512 * 1024; // 512 KB
+  const chunkSize = 512 * 1024;
+  const transferStart = performance.now();
 
   for (let i = 0; i < files.length && !transferAbort; i++) {
     const file = files[i];
@@ -287,6 +295,7 @@ async function sendFiles(files) {
     let offset = 0;
     let lastTime = performance.now();
     let lastBytes = 0;
+    let currentSpeed = 0; // bytes/sec
 
     while (offset < file.size && !transferAbort) {
       await waitForBuffer();
@@ -305,11 +314,20 @@ async function sendFiles(files) {
       $("sDone").textContent = `${fmtSize(offset)} / ${fmtSize(file.size)}`;
 
       const now = performance.now();
+      const elapsedSec = (now - transferStart) / 1000;
+      $("sElapsed").textContent = "⏱ " + fmtTime(elapsedSec);
+
       if (now - lastTime > 200) {
-        const speed = ((offset - lastBytes) / ((now - lastTime) / 1000)) / 1024;
-        $("sSpeed").textContent = speed.toFixed(1) + " КБ/с";
+        currentSpeed = ((offset - lastBytes) / ((now - lastTime) / 1000));
+        $("sSpeed").textContent = (currentSpeed / 1024).toFixed(1) + " КБ/с";
         lastTime = now;
         lastBytes = offset;
+
+        // ETA
+        if (currentSpeed > 0) {
+          const remain = (file.size - offset) / currentSpeed;
+          $("sEta").textContent = "залишилось ~" + fmtTime(remain);
+        }
       }
     }
 
@@ -324,6 +342,7 @@ async function sendFiles(files) {
     $("sStatus").textContent = "Готово ✅";
     $("sPct").textContent = "100%";
     $("sBar").style.width = "100%";
+    $("sEta").textContent = "готово";
   }
 }
 
@@ -335,7 +354,8 @@ function startReceive(meta) {
     recvState = {
       files: [],
       current: null,
-      total: meta.total || 1
+      total: meta.total || 1,
+      startTime: performance.now()
     };
   }
 
@@ -347,7 +367,8 @@ function startReceive(meta) {
     chunks: [],
     received: 0,
     lastTime: performance.now(),
-    lastBytes: 0
+    lastBytes: 0,
+    speed: 0
   };
 
   $("waitArea").classList.add("hidden");
@@ -359,6 +380,8 @@ function startReceive(meta) {
   $("rDone").textContent = `0 / ${fmtSize(meta.size)}`;
   $("rFileProgress").textContent = `Файл ${(meta.index || 0) + 1} з ${meta.total || 1}`;
   $("rStatus").textContent = "Отримання…";
+  $("rElapsed").textContent = "⏱ 00:00";
+  $("rEta").textContent = "залишилось —";
 }
 
 function onChunk(msg) {
@@ -373,11 +396,19 @@ function onChunk(msg) {
   $("rDone").textContent = `${fmtSize(cur.received)} / ${fmtSize(cur.size)}`;
 
   const now = performance.now();
+  const elapsedSec = (now - recvState.startTime) / 1000;
+  $("rElapsed").textContent = "⏱ " + fmtTime(elapsedSec);
+
   if (now - cur.lastTime > 200) {
-    const speed = ((cur.received - cur.lastBytes) / ((now - cur.lastTime) / 1000)) / 1024;
-    $("rSpeed").textContent = speed.toFixed(1) + " КБ/с";
+    cur.speed = ((cur.received - cur.lastBytes) / ((now - cur.lastTime) / 1000));
+    $("rSpeed").textContent = (cur.speed / 1024).toFixed(1) + " КБ/с";
     cur.lastTime = now;
     cur.lastBytes = cur.received;
+
+    if (cur.speed > 0) {
+      const remain = (cur.size - cur.received) / cur.speed;
+      $("rEta").textContent = "залишилось ~" + fmtTime(remain);
+    }
   }
 }
 
